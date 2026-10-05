@@ -5,71 +5,26 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 const REAL_DEBRID_API_KEY = process.env.RD_API_KEY;
 
-// قاعدة بيانات حقيقية ومنظمة حسب الشركات الكبرى مع الـ Hashes الخاصة بها
-const database = {
-    'Brazzers': [
-        {
-            id: 'brazzers_1',
-            name: 'Brazzers Exclusives - Top Release 2026',
-            poster: 'https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?w=300&h=450&fit=crop',
-            description: 'أحدث إنتاجات شركة Brazzers الحصرية المتاحة على سحابة Real-Debrid الآمنة.',
-            hash: '4A6C5D8E9F1A2B3C4D5E6F7A8B9C0D1E2F3A4B5C'
-        }
-    ],
-    'Vixen': [
-        {
-            id: 'vixen_1',
-            name: 'Vixen Cinematic Masterpiece 2026',
-            poster: 'https://images.unsplash.com/photo-1541701494587-cb58502866ab?w=300&h=450&fit=crop',
-            description: 'إنتاج عالي الجودة لشركة Vixen يعمل فورياً وبدون أي تحميل محلي.',
-            hash: 'B5C4D3E2F1A09B8C7D6E5F4A3B2C1D0E9F8A7B6C'
-        }
-    ],
-    'Reality Kings': [
-        {
-            id: 'realitykings_1',
-            name: 'Reality Kings Ultimate Collection 2026',
-            poster: 'https://images.unsplash.com/photo-1578926375605-eaf7559b1458?w=300&h=450&fit=crop',
-            description: 'أقوى إصدارات Reality Kings منظمة ومتاحة عبر سيرفرات Debrid المشفرة.',
-            hash: 'C1D2E3F4A5B6C7D8E9F0A1B2C3D4E5F6A7B8C9D0'
-        }
-    ],
-    'Blacked': [
-        {
-            id: 'blacked_1',
-            name: 'Blacked Raw & Exclusive 2026',
-            poster: 'https://images.unsplash.com/photo-1579783902614-a3fb3927b675?w=300&h=450&fit=crop',
-            description: 'محتوى حصري لشركة Blacked بجودة فائقة وتشغيل فوري آمن.',
-            hash: '1A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7E8F9A0B'
-        }
-    ],
-    'Tushy': [
-        {
-            id: 'tushy_1',
-            name: 'Tushy Premium Selection 2026',
-            poster: 'https://images.unsplash.com/photo-1582561214151-c84021a8d11e?w=300&h=450&fit=crop',
-            description: 'محتوى مختار بعناية لشركة Tushy متوافق مع الحماية السحابية التامة.',
-            hash: '9F8E7D6C5B4A3F2E1D0C9B8A7F6E5D4C3B2A1F0E'
-        }
-    ]
-};
+// ذاكرة مؤقتة لحفظ أسماء الأفلام وربطها بالمعرفات
+const metaCache = new Map();
 
+// تم تغيير ID الإضافة لكسر الكاش القديم في Stremio وإجباره على التحديث
 const manifest = {
-    id: 'org.stremio.adult.debrid.studios',
-    version: '1.3.0',
-    name: 'Adult Studios Debrid Addon',
-    description: 'إضافة مخصصة لمحتوى الكبار منظمة حسب شركات الإنتاج مع الفحص الفوري لـ Real-Debrid',
+    id: 'org.stremio.adult.debrid.v5',
+    version: '1.5.0',
+    name: 'Adult Studios Ultimate RD',
+    description: 'يجلب آلاف الأفلام الحقيقية للشركات عبر API مع تشغيل مباشر وآمن من Real-Debrid',
     types: ['movie'],
     catalogs: [
         {
             type: 'movie',
-            id: 'adult_studios_catalog',
-            name: 'شركات الإنتاج الكبرى (+18)',
-            genres: Object.keys(database)
+            id: 'adult_studios_live',
+            name: 'شركات الإنتاج (+18)',
+            genres: ['Brazzers', 'Vixen', 'Reality Kings', 'Blacked', 'Tushy', 'Evil Angel', 'Naughty America', 'BangBros']
         }
     ],
     resources: ['catalog', 'meta', 'stream'],
-    idPrefixes: ['brazzers_', 'vixen_', 'realitykings_', 'blacked_', 'tushy_']
+    idPrefixes: ['tpb_']
 };
 
 app.get('/manifest.json', (req, res) => {
@@ -78,114 +33,129 @@ app.get('/manifest.json', (req, res) => {
     res.json(manifest);
 });
 
-// مسار جلب الكتالوج حسب الشركة المختارة
+// 1. مسار جلب الكتالوج (يسحب آلاف الأفلام الحقيقية فوراً)
 app.get('/catalog/:type/:id/:extra?.json', async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
 
-    let selectedGenre = 'Brazzers';
+    let genre = 'Brazzers';
     if (req.params.extra) {
         const match = req.params.extra.match(/genre=([^&]+)/);
-        if (match) selectedGenre = decodeURIComponent(match[1]);
+        if (match) genre = decodeURIComponent(match[1]);
     }
 
-    const items = database[selectedGenre] || [];
+    try {
+        // الاتصال بمحرك بحث تورنت مفتوح لجلب أحدث إصدارات الشركة
+        const tpbRes = await axios.get(`https://apibay.org/q.php?q=${encodeURIComponent(genre)}&cat=500`);
+        const torrents = tpbRes.data;
 
-    const metas = items.map(item => ({
-        id: item.id,
-        type: 'movie',
-        name: item.name,
-        poster: item.poster,
-        description: item.description,
-        genres: [selectedGenre]
-    }));
+        // التحقق من وجود نتائج حقيقية
+        if (!Array.isArray(torrents) || torrents[0].id === '0') {
+            return res.json({ metas: [] });
+        }
 
-    res.json({ metas });
+        const metas = torrents.slice(0, 100).map(t => {
+            const metaId = `tpb_${t.info_hash}`;
+            const sizeGB = (t.size / 1024 / 1024 / 1024).toFixed(2);
+            
+            // حفظ البيانات في الذاكرة لكي تظهر في صفحة التفاصيل
+            metaCache.set(metaId, { name: t.name, hash: t.info_hash });
+
+            return {
+                id: metaId,
+                type: 'movie',
+                name: t.name,
+                poster: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=300&h=450&fit=crop', // بوستر سينمائي كلاسيكي لتوحيد الشكل
+                description: `الشركة: ${genre}\nالحجم: ${sizeGB} GB\nالرافعين: ${t.seeders}`,
+                genres: [genre]
+            };
+        });
+
+        res.json({ metas });
+    } catch (e) {
+        res.json({ metas: [] });
+    }
 });
 
-// مسار تفاصيل الفيلم (Meta) مصحح تماماً ليتطابق مع المعرفات
-app.get('/meta/:type/:id.json', async (req, res) => {
+// 2. مسار تفاصيل الفيلم (تم حله ليعرض التفاصيل فوراً)
+app.get('/meta/:type/:id.json', (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
 
-    const { id } = req.params;
-    let foundItem = null;
+    const id = req.params.id;
+    const cached = metaCache.get(id);
 
-    for (const genre in database) {
-        const found = database[genre].find(i => i.id === id);
-        if (found) {
-            foundItem = found;
-            break;
-        }
-    }
-
-    if (!foundItem) {
+    if (!cached) {
         return res.json({ meta: null });
     }
 
     res.json({
         meta: {
-            id: foundItem.id,
+            id: id,
             type: 'movie',
-            name: foundItem.name,
-            poster: foundItem.poster,
-            description: foundItem.description,
-            releaseInfo: '2026'
+            name: cached.name,
+            poster: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=300&h=450&fit=crop',
+            description: 'شاهد هذا الفيلم الآن بسرعة فائقة وبدون أي تخزين محلي بفضل الاتصال السحابي المشفر عبر Real-Debrid.',
+            releaseInfo: 'RD Cloud'
         }
     });
 });
 
-// مسار جلب الروابط والتحقق الفوري من سحابة Real-Debrid
+// 3. مسار البث وتوليد رابط Real-Debrid المباشر
 app.get('/stream/:type/:id.json', async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
 
-    const { id } = req.params;
+    const id = req.params.id;
+    const hash = id.replace('tpb_', '');
+
+    if (!REAL_DEBRID_API_KEY) {
+        return res.json({ streams: [{ title: '⚠️ ضع التوكن في Render', url: '' }] });
+    }
 
     try {
-        if (!REAL_DEBRID_API_KEY) {
-            return res.json({ streams: [{ title: '⚠️ مفتاح Real-Debrid غير مضاف في إعدادات المنصة', url: '' }] });
-        }
+        const rdHeaders = { Authorization: `Bearer ${REAL_DEBRID_API_KEY}` };
+        const rdPostHeaders = { ...rdHeaders, 'Content-Type': 'application/x-www-form-urlencoded' };
 
-        let targetHash = '';
-        for (const genre in database) {
-            const found = database[genre].find(i => i.id === id);
-            if (found) {
-                targetHash = found.hash;
-                break;
+        // أ- فحص إذا كان الملف مخزناً في السحابة
+        const iaRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/${hash}`, { headers: rdHeaders });
+        const ia = iaRes.data;
+
+        if (ia && ia[hash] && ia[hash].rd && ia[hash].rd.length > 0) {
+            
+            // ب- إذا كان مخزناً، نقوم بإنشاء الرابط المباشر
+            const magnet = `magnet:?xt=urn:btih:${hash}`;
+            const addRes = await axios.post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', `magnet=${encodeURIComponent(magnet)}`, { headers: rdPostHeaders });
+            const torrentId = addRes.data.id;
+
+            // اختيار ملف الفيديو
+            await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, 'files=all', { headers: rdPostHeaders });
+
+            // جلب معلومات الملف
+            const infoRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, { headers: rdHeaders });
+            const links = infoRes.data.links;
+
+            if (links && links.length > 0) {
+                // فك التشفير (Unrestrict) للحصول على الرابط المباشر لـ Stremio
+                const unrestrictRes = await axios.post('https://api.real-debrid.com/rest/1.0/unrestrict/link', `link=${encodeURIComponent(links[0])}`, { headers: rdPostHeaders });
+                const streamUrl = unrestrictRes.data.download;
+
+                return res.json({
+                    streams: [
+                        {
+                            title: '🚀 [RD Direct Stream]\nتشغيل فوري - مشفر 100%',
+                            url: streamUrl
+                        }
+                    ]
+                });
             }
         }
 
-        if (!targetHash) {
-            return res.json({ streams: [] });
-        }
-
-        // فحص التوفر الفوري (Instant Availability) عبر Real-Debrid API
-        const checkResponse = await axios.get(
-            `https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/${targetHash}`,
-            { headers: { Authorization: `Bearer ${REAL_DEBRID_API_KEY}` } }
-        );
-
-        const data = checkResponse.data;
-        let streams = [];
-
-        if (data && data[targetHash] && data[targetHash].rd && data[targetHash].rd.length > 0) {
-            streams.push({
-                title: '🔥 [Real-Debrid Cached] - تشغيل فوري وآمن 100% (4K/1080p)',
-                url: 'https://pro.real-debrid.com/streaming-link-example'
-            });
-        } else {
-            streams.push({
-                title: '⚡ [Real-Debrid Cloud] - تشغيل سحابي مباشر بدون تحميل محلي',
-                url: 'https://pro.real-debrid.com/streaming-link-example'
-            });
-        }
-
-        res.json({ streams });
+        res.json({ streams: [{ title: '⚠️ الملف يحتاج تحميل غير متوفر كاش حالياً', url: '' }] });
 
     } catch (error) {
-        console.error('RD Error:', error.message);
-        res.json({ streams: [{ title: 'خطأ في الاتصال بسيرفر Real-Debrid الآمن', url: '' }] });
+        console.error(error.message);
+        res.json({ streams: [{ title: '❌ خطأ في الاتصال بسيرفر RD', url: '' }] });
     }
 });
 
