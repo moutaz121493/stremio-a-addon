@@ -1,170 +1,164 @@
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors'); // مكتبة حماية الاتصالات
-const app = express();
+const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
 
-app.use(cors()); // تفعيل الـ CORS لتطبيق Stremio
+const PORT = process.env.PORT || 7000;
+const PAGE_SIZE = 100;
+const PREFIX = "ia:";
+const IA = "https://archive.org";
 
-const PORT = process.env.PORT || 10000;
-const REAL_DEBRID_API_KEY = process.env.RD_API_KEY;
-
-// دوال تشفير آمنة جداً للمسارات (لمنع أخطاء 404 في Stremio)
-function toSafeBase64(str) {
-    return Buffer.from(str, 'utf-8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-function fromSafeBase64(str) {
-    let b64 = str.replace(/-/g, '+').replace(/_/g, '/');
-    while (b64.length % 4) b64 += '=';
-    return Buffer.from(b64, 'base64').toString('utf-8');
-}
+// Internet Archive collections shown as Stremio catalogs
+const CATALOGS = [
+  { id: "ia-feature-films", name: "Classic Feature Films", collection: "feature_films" },
+  { id: "ia-scifi-horror", name: "Sci-Fi & Horror Classics", collection: "SciFi_Horror" },
+  { id: "ia-film-noir", name: "Film Noir", collection: "film_noir" },
+];
 
 const manifest = {
-    id: 'org.stremio.adult.debrid.pro',
-    version: '3.0.0', // تم رفع النسخة لكسر الكاش الإجباري
-    name: 'Adult Studios PRO (RD)',
-    description: 'الإصدار الاحترافي: جلب آلاف الأفلام الحقيقية مع تشغيل سحابي فوري ومشفر من Real-Debrid',
-    types: ['movie'],
-    catalogs: [
-        {
-            type: 'movie',
-            id: 'adult_studios_pro',
-            name: 'شركات الإنتاج (+18)',
-            genres: ['Brazzers', 'Vixen', 'Reality Kings', 'Blacked', 'Tushy', 'Evil Angel', 'Naughty America', 'BangBros', 'Jules Jordan']
-        }
-    ],
-    resources: ['catalog', 'meta', 'stream'],
-    idPrefixes: ['abd_']
+  id: "community.publicdomain.cinema",
+  version: "1.0.0",
+  name: "Public Domain Cinema",
+  description: "Thousands of free, legal public-domain movies streamed from the Internet Archive.",
+  resources: ["catalog", "meta", "stream"],
+  types: ["movie"],
+  idPrefixes: [PREFIX],
+  catalogs: CATALOGS.map((c) => ({
+    type: "movie",
+    id: c.id,
+    name: c.name,
+    extra: [{ name: "search" }, { name: "skip" }],
+  })),
 };
 
-// 1. مسار تعريف الإضافة
-app.get('/manifest.json', (req, res) => {
-    res.json(manifest);
+const builder = new addonBuilder(manifest);
+
+// ---------- helpers ----------
+
+// Small in-memory cache so we don't hammer archive.org
+const cache = new Map();
+async function getJson(url, ttlMs = 6 * 60 * 60 * 1000) {
+  const hit = cache.get(url);
+  if (hit && hit.expires > Date.now()) return hit.data;
+
+  const res = await fetch(url, {
+    headers: { "User-Agent": "PublicDomainCinema-Stremio/1.0" },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const data = await res.json();
+
+  if (cache.size > 500) cache.delete(cache.keys().next().value); // simple eviction
+  cache.set(url, { data, expires: Date.now() + ttlMs });
+  return data;
+}
+
+// IA fields can be strings, arrays, or contain HTML
+function clean(value) {
+  if (Array.isArray(value)) value = value.join(" ");
+  return String(value || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function thumb(identifier) {
+  return `${IA}/services/img/${encodeURIComponent(identifier)}`;
+}
+
+function searchUrl(collection, search, skip) {
+  let q = `collection:(${collection}) AND mediatype:(movies)`;
+  if (search) q += ` AND title:(${search.replace(/[()":\\]/g, " ")})`;
+
+  const params = new URLSearchParams({
+    q,
+    rows: String(PAGE_SIZE),
+    page: String(Math.floor(skip / PAGE_SIZE) + 1),
+    output: "json",
+  });
+  ["identifier", "title", "year", "description"].forEach((f) => params.append("fl[]", f));
+  params.append("sort[]", "downloads desc");
+  return `${IA}/advancedsearch.php?${params}`;
+}
+
+// ---------- catalog ----------
+
+builder.defineCatalogHandler(async ({ id, extra = {} }) => {
+  const cat = CATALOGS.find((c) => c.id === id);
+  if (!cat) return { metas: [] };
+
+  try {
+    const data = await getJson(searchUrl(cat.collection, extra.search, Number(extra.skip) || 0));
+    const metas = (data.response?.docs || []).map((doc) => ({
+      id: PREFIX + doc.identifier,
+      type: "movie",
+      name: clean(doc.title) || doc.identifier,
+      poster: thumb(doc.identifier),
+      posterShape: "poster",
+      releaseInfo: doc.year ? String(doc.year) : undefined,
+      description: clean(doc.description).slice(0, 300),
+    }));
+    return { metas, cacheMaxAge: 6 * 3600 };
+  } catch (err) {
+    console.error("catalog error:", err.message);
+    return { metas: [] };
+  }
 });
 
-// 2. مسار جلب القوائم (يسحب الأفلام الحقيقية)
-app.get('/catalog/:type/:id/:extra?.json', async (req, res) => {
-    let genre = 'Brazzers';
-    if (req.params.extra) {
-        const match = req.params.extra.match(/genre=([^&]+)/);
-        if (match) genre = decodeURIComponent(match[1]);
-    }
+// ---------- meta ----------
 
-    try {
-        const axiosConfig = { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000 };
-        const tpbRes = await axios.get(`https://apibay.org/q.php?q=${encodeURIComponent(genre)}&cat=500`, axiosConfig);
-        const torrents = tpbRes.data;
+builder.defineMetaHandler(async ({ id }) => {
+  const identifier = id.slice(PREFIX.length);
+  const data = await getJson(`${IA}/metadata/${encodeURIComponent(identifier)}`, 24 * 3600 * 1000);
+  const m = data.metadata || {};
 
-        if (!Array.isArray(torrents) || torrents[0].id === '0') {
-            return res.json({ metas: [] });
-        }
-
-        const metas = torrents.slice(0, 100).filter(t => t.info_hash).map(t => {
-            // تنظيف الاسم وتشفيره بصيغة آمنة للمسارات
-            const cleanName = t.name.substring(0, 80).replace(/\|/g, ''); 
-            const dataString = `${genre}|${t.info_hash}|${encodeURIComponent(cleanName)}`;
-            const safeId = 'abd_' + toSafeBase64(dataString);
-            const sizeGB = (t.size / 1073741824).toFixed(2);
-
-            return {
-                id: safeId,
-                type: 'movie',
-                name: t.name,
-                poster: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=300&h=450&fit=crop',
-                description: `🎬 الشركة: ${genre}\n📦 الحجم: ${sizeGB} GB\n🚀 السيدرز: ${t.seeders}\n\nيتم التشغيل بأمان وتشفير عبر سحابة Real-Debrid.`,
-                genres: [genre]
-            };
-        });
-        res.json({ metas });
-    } catch (e) {
-        console.error('Catalog Error:', e.message);
-        res.json({ metas: [] });
-    }
+  return {
+    meta: {
+      id,
+      type: "movie",
+      name: clean(m.title) || identifier,
+      poster: thumb(identifier),
+      background: thumb(identifier),
+      description: clean(m.description),
+      releaseInfo: clean(m.year) || clean(m.date).slice(0, 4) || undefined,
+      runtime: clean(m.runtime) || undefined,
+      website: `${IA}/details/${identifier}`,
+    },
+    cacheMaxAge: 24 * 3600,
+  };
 });
 
-// 3. مسار تفاصيل الفيلم (يفك التشفير الآمن)
-app.get('/meta/:type/:id.json', (req, res) => {
-    const id = req.params.id;
-    try {
-        const b64 = id.replace('abd_', '');
-        const decoded = fromSafeBase64(b64);
-        const [genre, hash, encodedName] = decoded.split('|');
-        const name = decodeURIComponent(encodedName);
+// ---------- streams ----------
 
-        res.json({
-            meta: {
-                id: id,
-                type: 'movie',
-                name: name,
-                poster: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=300&h=450&fit=crop',
-                description: `إنتاج شركة: ${genre} - جودة فائقة وحماية سحابية.`,
-                releaseInfo: 'Real-Debrid Cloud'
-            }
-        });
-    } catch (e) {
-        res.json({ meta: null });
-    }
+const VIDEO_EXT = /\.(mp4|m4v|webm|mkv|ogv|avi|mpe?g)$/i;
+const WEB_READY = /\.(mp4|m4v|webm)$/i;
+
+builder.defineStreamHandler(async ({ id }) => {
+  const identifier = id.slice(PREFIX.length);
+  const data = await getJson(`${IA}/metadata/${encodeURIComponent(identifier)}`, 24 * 3600 * 1000);
+
+  const files = (data.files || [])
+    .filter((f) => VIDEO_EXT.test(f.name))
+    // Prefer browser/TV-friendly MP4, then bigger (= higher quality) files
+    .sort((a, b) => {
+      const aw = WEB_READY.test(a.name) ? 1 : 0;
+      const bw = WEB_READY.test(b.name) ? 1 : 0;
+      if (aw !== bw) return bw - aw;
+      return Number(b.size || 0) - Number(a.size || 0);
+    })
+    .slice(0, 5);
+
+  const streams = files.map((f) => {
+    const ext = f.name.split(".").pop().toUpperCase();
+    const size = f.size ? `${Math.round(Number(f.size) / 1048576)} MB` : "";
+    const path = f.name.split("/").map(encodeURIComponent).join("/");
+    return {
+      name: "Internet Archive",
+      description: [f.format || ext, size].filter(Boolean).join(" • "),
+      url: `${IA}/download/${encodeURIComponent(identifier)}/${path}`,
+      behaviorHints: { notWebReady: !WEB_READY.test(f.name) },
+    };
+  });
+
+  return { streams, cacheMaxAge: 24 * 3600 };
 });
 
-// 4. مسار جلب روابط المشاهدة الآمنة من Real-Debrid
-app.get('/stream/:type/:id.json', async (req, res) => {
-    const id = req.params.id;
-
-    if (!REAL_DEBRID_API_KEY) {
-        return res.json({ streams: [{ title: '⚠️ مفتاح Debrid مفقود في إعدادات Render', url: '' }] });
-    }
-
-    try {
-        const b64 = id.replace('abd_', '');
-        const decoded = fromSafeBase64(b64);
-        const hash = decoded.split('|')[1];
-
-        const rdHeaders = { Authorization: `Bearer ${REAL_DEBRID_API_KEY}` };
-        const rdPostHeaders = { ...rdHeaders, 'Content-Type': 'application/x-www-form-urlencoded' };
-
-        // أ- فحص ما إذا كان الملف متوفراً في السحابة فورياً
-        const iaRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/${hash}`, { headers: rdHeaders });
-        const ia = iaRes.data;
-
-        if (ia && ia[hash] && ia[hash].rd && ia[hash].rd.length > 0) {
-            
-            // اختيار الملفات المخزنة بالفعل فقط (لضمان التشغيل الفوري 100%)
-            const cachedVariant = ia[hash].rd[0];
-            const fileIds = Object.keys(cachedVariant).join(',');
-
-            // ب- إضافة الـ Magnet
-            const magnet = `magnet:?xt=urn:btih:${hash}`;
-            const addRes = await axios.post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', `magnet=${encodeURIComponent(magnet)}`, { headers: rdPostHeaders });
-            const torrentId = addRes.data.id;
-
-            // ج- اختيار الملفات المحددة
-            await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, `files=${fileIds}`, { headers: rdPostHeaders });
-
-            // د- جلب الرابط السحابي
-            const infoRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, { headers: rdHeaders });
-            const links = infoRes.data.links;
-
-            if (links && links.length > 0) {
-                // هـ- فك التشفير للحصول على رابط التشغيل المباشر
-                const unrestrictRes = await axios.post('https://api.real-debrid.com/rest/1.0/unrestrict/link', `link=${encodeURIComponent(links[0])}`, { headers: rdPostHeaders });
-                
-                return res.json({
-                    streams: [{
-                        title: '🚀 [RD Direct] - 4K/1080p\nتشغيل سحابي فوري ومشفر',
-                        url: unrestrictRes.data.download
-                    }]
-                });
-            }
-        }
-
-        // إذا لم يكن مخزناً في الكاش
-        res.json({ streams: [{ title: '⚠️ الملف يحتاج للتحميل (غير مخزن سحابياً حالياً)', url: '' }] });
-
-    } catch (error) {
-        console.error('Stream Error:', error.message);
-        res.json({ streams: [{ title: '❌ خطأ في الاتصال بسيرفر Real-Debrid', url: '' }] });
-    }
-});
-
-app.listen(PORT, () => {
-    console.log(`PRO Server running on port ${PORT}`);
-});
+serveHTTP(builder.getInterface(), { port: PORT });
+console.log(`Public Domain Cinema running on port ${PORT}`);
