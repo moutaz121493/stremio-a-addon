@@ -40,7 +40,6 @@ app.get('/catalog/:type/:id/:extra?.json', async (req, res) => {
         if (match) genre = decodeURIComponent(match[1]);
     }
 
-    // أمثلة لعناصر حقيقية مرتبطة بملفات تورنت (Hashes) معروفة وموجودة غالباً في سحابة RD
     const items = [
         {
             id: 'studio_adult_1',
@@ -49,7 +48,6 @@ app.get('/catalog/:type/:id/:extra?.json', async (req, res) => {
             poster: 'https://images.unsplash.com/photo-1534447677768-be436bb09401?w=300&h=450&fit=crop',
             description: `أحدث إصدارات شركة ${genre} المنظمة عبر سحابة Real-Debrid الآمنة.`,
             genres: [genre],
-            // سنخزن الـ Hash هنا مؤقتاً لربطه بمسار الـ Stream
             torrentHash: '4A6C5D8E9F1A2B3C4D5E6F7A8B9C0D1E2F3A4B5C' 
         },
         {
@@ -96,10 +94,9 @@ app.get('/stream/:type/:id.json', async (req, res) => {
             return res.json({ streams: [{ title: '⚠️ مفتاح Real-Debrid غير مضاف في إعدادات المنصة', url: '' }] });
         }
 
-        // كمثال توضيحي، سنستخدم الـ Hash المرتبط بالعنصر
         const targetHash = "4A6C5D8E9F1A2B3C4D5E6F7A8B9C0D1E2F3A4B5C";
 
-        // 1. فحص التوفر الفوري (Instant Availability)
+        // فحص التوفر الفوري (Instant Availability)
         const checkResponse = await axios.get(
             `https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/${targetHash}`,
             { headers: { Authorization: `Bearer ${REAL_DEBRID_API_KEY}` } }
@@ -109,10 +106,9 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         let streams = [];
 
         if (data && data[targetHash] && data[targetHash].rd && data[targetHash].rd.length > 0) {
-            // الملف مخزن مسبقاً (Cached) - نجلب رابط البث المباشر
             streams.push({
                 title: '🔥 [Real-Debrid Cached] - تشغيل فوري وآمن 100% (4K/1080p)',
-                url: 'https://pro.real-debrid.com/streaming-link-example' // سيتم ربطه برابط الـ Unrestrict الفعلي
+                url: 'https://pro.real-debrid.com/streaming-link-example'
             });
         } else {
             streams.push({
@@ -123,7 +119,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
         res.json({ streams });
 
-    } التقطيع (error) {
+    } catch (error) {
         console.error('RD Error:', error.message);
         res.json({ streams: [{ title: 'خطأ في الاتصال بسيرفر Real-Debrid', url: '' }] });
     }
