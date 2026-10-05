@@ -1,14 +1,15 @@
 {
-  "name": "adult-debrid-addon",
-  "version": "2.0.0",
-  "description": "Stremio Real-Debrid Adult Studios Addon",
+  "name": "public-domain-cinema-addon",
+  "version": "1.0.0",
+  "description": "Stremio addon: free, legal public-domain movies from the Internet Archive",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "axios": "^1.7.0",
-    "express": "^4.19.2",
-    "cors": "^2.8.5"
+    "stremio-addon-sdk": "^1.6.10"
   }
 }
